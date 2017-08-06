@@ -14,5 +14,6 @@ message Owner {
 
 message Asset {
 	string locked_to_channel = 1;
-	repeated Owner history = 2;
+	string locked_to_chaincode = 2;
+	repeated Owner history = 3;
 }

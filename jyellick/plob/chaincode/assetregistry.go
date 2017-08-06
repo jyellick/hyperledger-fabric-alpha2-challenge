@@ -26,11 +26,11 @@ func (s *AssetRegistry) Init(stub shim.ChaincodeStubInterface) sc.Response {
 
 // Invoke allows for the manipulation of assets.
 // Possible arguments are:
-//   ["create",   <asset_key>]                  // Creates a new asset
-//   ["lock",     <asset_key>, <to_channel>]    // Locks the asset to another channel, disabling other manipulation of the asset
-//   ["show",     <asset_key>, <from_channel>]  // Shows an asset from another channel in this channel
-//   ["transfer", <asset_key>, <to_owner>]      // Transfers an asset's ownership to another identity
-//   ["query",    <asset_key>]                  // Query's an asset's state
+//   ["create",   <asset_key>] 										// Creates a new asset
+//   ["lock",     <asset_key>, <to_channel>, <to_chaincode>] 		// Locks the asset to another channel/chaincode, disabling other manipulation of the asset
+//   ["show",     <asset_key>, <from_channel>, <from_chaincode>] 	// Shows an asset from another channel/chaincode in this channel
+//   ["transfer", <asset_key>, <to_owner>]      					// Transfers an asset's ownership to another identity
+//   ["query",    <asset_key>] 										// Query's an asset's state
 func (s *AssetRegistry) Invoke(stub shim.ChaincodeStubInterface) sc.Response {
 	ac, err := newAssetContext(stub)
 	if err != nil {
@@ -41,14 +41,17 @@ func (s *AssetRegistry) Invoke(stub shim.ChaincodeStubInterface) sc.Response {
 
 // parseArgs returns the function name, the key of the asset to operate on, an optional
 // additional arg for the function, or an error if there are too few, or too many args
-func parseArgs(args [][]byte) (function string, key string, arg []byte, err error) {
+func parseArgs(args [][]byte) (function string, key string, newArgs [][]byte, err error) {
 	switch len(args) {
+	case 4:
+		newArgs = append(newArgs, args[3])
+		fallthrough
 	case 3:
-		arg = args[2]
+		newArgs = append(newArgs, args[2])
 		fallthrough
 	case 2:
-		key = string(args[1])
 		function = string(args[0])
+		key = string(args[1])
 	case 1:
 		err = fmt.Errorf("Invoke called with only one argument")
 	case 0:
@@ -65,11 +68,11 @@ type assetContext struct {
 	asset       *Asset // May be nil if asset does not already exist
 	function    string // The name of the operation being invoked
 	key         string // The name of the asset being operated on
-	functionArg []byte // The remaining arg if any to pass to the operation
+	functionArgs [][]byte // The remaining args if any to pass to the operation
 }
 
 func newAssetContext(stub shim.ChaincodeStubInterface) (*assetContext, error) {
-	function, key, functionArg, err := parseArgs(stub.GetArgs())
+	function, key, functionArgs, err := parseArgs(stub.GetArgs())
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +103,7 @@ func newAssetContext(stub shim.ChaincodeStubInterface) (*assetContext, error) {
 		asset:       asset,
 		key:         key,
 		function:    function,
-		functionArg: functionArg,
+		functionArgs: functionArgs,
 	}, nil
 }
 
@@ -152,7 +155,7 @@ func (ac *assetContext) ownsAsset() bool {
 }
 
 func (ac *assetContext) create() ([]byte, error) {
-	if ac.functionArg != nil {
+	if ac.functionArgs != nil {
 		return nil, fmt.Errorf("Too many arguments to 'create'")
 	}
 
@@ -177,11 +180,11 @@ func (ac *assetContext) create() ([]byte, error) {
 }
 
 func (ac *assetContext) lock() ([]byte, error) {
-	if ac.functionArg == nil {
-		return nil, fmt.Errorf("Must pass toChannel argument")
+	if !(ac.functionArgs != nil && (len(ac.functionArgs) == 2)) {
+		return nil, fmt.Errorf("Must pass toChaincode/toChannel arguments")
 	}
 
-	toChannel := string(ac.functionArg)
+	toChaincode, toChannel := string(ac.functionArgs[0]), string(ac.functionArgs[1])
 
 	if ac.asset == nil {
 		return nil, fmt.Errorf("Cannot lock asset which does not exist")
@@ -191,6 +194,8 @@ func (ac *assetContext) lock() ([]byte, error) {
 		return nil, fmt.Errorf("Asset %s is already locked to %s", ac.key, ac.asset.LockedToChannel)
 	}
 
+	// The check above can be considered sufficient -- no need to check LockedToChaincode separately
+
 	if !ac.ownsAsset() {
 		return nil, fmt.Errorf("Not authorized to lock asset %s", ac.key)
 	}
@@ -199,6 +204,7 @@ func (ac *assetContext) lock() ([]byte, error) {
 	// be a sanity check, but not necessary for correctness
 
 	ac.asset.LockedToChannel = toChannel
+	ac.asset.LockedToChaincode = toChaincode
 
 	assetBytes, err := proto.Marshal(ac.asset)
 	if err != nil {
@@ -214,23 +220,22 @@ func (ac *assetContext) lock() ([]byte, error) {
 }
 
 func (ac *assetContext) show() ([]byte, error) {
-	if ac.functionArg == nil {
-		return nil, fmt.Errorf("Must pass fromChannel argument")
+	if !(ac.functionArgs != nil && (len(ac.functionArgs) == 2)) {
+		return nil, fmt.Errorf("Must pass fromChaincode/fromChannel arguments")
 	}
 
-	fromChannel := string(ac.functionArg)
+	fromChaincode, fromChannel := string(ac.functionArgs[0]), string(ac.functionArgs[1])
 
 	if ac.asset != nil && ac.asset.LockedToChannel == "" {
 		return nil, fmt.Errorf("Cannot show an extant unlocked asset")
 	}
 
-	// TODO perform cross channel query based on 'fromChannel'
-	// as a hack for now, we always assume the asset existed in the fromChannel
-	_ = fromChannel
-	fromAsset := &Asset{
-		History: []*Owner{
-			&Owner{Id: ac.creator},
-		},
+	// Perform cross-channel query on 'fromChannel'/`fromChaincode`
+	resp := ac.stub.InvokeChaincode(fromChaincode, [][]byte{[]byte("query"), []byte(ac.key)}, fromChannel)
+	fromAssetBytes := resp.Payload
+	fromAsset := &Asset{}
+	if err := proto.Unmarshal(fromAssetBytes, fromAsset); err != nil {
+		return nil, fmt.Errorf("Cannot unmarshal cross-channel query value = %s", err.Error())
 	}
 
 	if ac.asset != nil {
@@ -241,6 +246,7 @@ func (ac *assetContext) show() ([]byte, error) {
 
 	toAssetBytes, err := proto.Marshal(&Asset{
 		LockedToChannel: "",
+		LockedToChaincode: "",
 		History:         append(fromAsset.History, fromAsset.History[len(fromAsset.History)-1]),
 	})
 	if err != nil {
@@ -256,11 +262,11 @@ func (ac *assetContext) show() ([]byte, error) {
 }
 
 func (ac *assetContext) transfer() ([]byte, error) {
-	if ac.functionArg == nil {
+	if ac.functionArgs != nil && (len(ac.functionArgs) == 1) {
 		return nil, fmt.Errorf("Must pass target to transfer to")
 	}
 
-	toID := ac.functionArg
+	toID := ac.functionArgs[0]
 
 	if ac.asset == nil {
 		return nil, fmt.Errorf("Cannot transfer an asset which does not exist")
@@ -290,7 +296,7 @@ func (ac *assetContext) transfer() ([]byte, error) {
 }
 
 func (ac *assetContext) query() ([]byte, error) {
-	if ac.functionArg == nil {
+	if ac.functionArgs == nil {
 		return nil, fmt.Errorf("Too many args to 'query'")
 	}
 
