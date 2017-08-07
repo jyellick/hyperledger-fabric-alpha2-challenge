@@ -16,7 +16,11 @@ import (
 	"github.com/golang/protobuf/proto"
 )
 
-// Define the Smart Contract structure
+// ATTN: For the purposes of this proof-of-concept, always deploy this chaincode
+// under the hard-coded `chaincodeName` below.
+const chaincodeName = "asset-transfer"
+
+// AssetRegistry defines the smart contract structure.
 type AssetRegistry struct{}
 
 // Init is called when the chaincode is instantiatied, for now, a no-op
@@ -26,11 +30,11 @@ func (s *AssetRegistry) Init(stub shim.ChaincodeStubInterface) sc.Response {
 
 // Invoke allows for the manipulation of assets.
 // Possible arguments are:
-//   ["create",   <asset_key>]                  // Creates a new asset
-//   ["lock",     <asset_key>, <to_channel>]    // Locks the asset to another channel, disabling other manipulation of the asset
-//   ["show",     <asset_key>, <from_channel>]  // Shows an asset from another channel in this channel
-//   ["transfer", <asset_key>, <to_owner>]      // Transfers an asset's ownership to another identity
-//   ["query",    <asset_key>]                  // Query's an asset's state
+//   ["create",   <asset_key>]                 // Creates a new asset
+//   ["lock",     <asset_key>, <to_channel>]   // Locks the asset to another channel, disabling other manipulation of the asset
+//   ["show",     <asset_key>, <from_channel>] // Shows an asset from another channel in this channel
+//   ["transfer", <asset_key>, <to_owner>]     // Transfers an asset's ownership to another identity
+//   ["query",    <asset_key>]                 // Queries an asset's state
 func (s *AssetRegistry) Invoke(stub shim.ChaincodeStubInterface) sc.Response {
 	ac, err := newAssetContext(stub)
 	if err != nil {
@@ -40,7 +44,7 @@ func (s *AssetRegistry) Invoke(stub shim.ChaincodeStubInterface) sc.Response {
 }
 
 // parseArgs returns the function name, the key of the asset to operate on, an optional
-// additional arg for the function, or an error if there are too few, or too many args
+// additional arg for the function, or an error if there are too few, or too many args.
 func parseArgs(args [][]byte) (function string, key string, arg []byte, err error) {
 	switch len(args) {
 	case 3:
@@ -65,7 +69,7 @@ type assetContext struct {
 	asset       *Asset // May be nil if asset does not already exist
 	function    string // The name of the operation being invoked
 	key         string // The name of the asset being operated on
-	functionArg []byte // The remaining arg if any to pass to the operation
+	functionArg []byte // The remaining arg, if any, to pass to the operation
 }
 
 func newAssetContext(stub shim.ChaincodeStubInterface) (*assetContext, error) {
@@ -157,7 +161,7 @@ func (ac *assetContext) create() ([]byte, error) {
 	}
 
 	if ac.asset != nil {
-		return nil, fmt.Errorf("Cannot create an asset who's key already exists")
+		return nil, fmt.Errorf("Cannot create an asset whose key already exists")
 	}
 
 	assetBytes, err := proto.Marshal(&Asset{
@@ -224,13 +228,12 @@ func (ac *assetContext) show() ([]byte, error) {
 		return nil, fmt.Errorf("Cannot show an extant unlocked asset")
 	}
 
-	// TODO perform cross channel query based on 'fromChannel'
-	// as a hack for now, we always assume the asset existed in the fromChannel
-	_ = fromChannel
-	fromAsset := &Asset{
-		History: []*Owner{
-			&Owner{Id: ac.creator},
-		},
+	// Perform cross-channel query on 'fromChannel'/`chaincodeName`
+	resp := ac.stub.InvokeChaincode(chaincodeName, [][]byte{[]byte("query"), []byte(ac.key)}, fromChannel)
+	fromAssetBytes := resp.Payload
+	fromAsset := &Asset{}
+	if err := proto.Unmarshal(fromAssetBytes, fromAsset); err != nil {
+		return nil, fmt.Errorf("Cannot unmarshal cross-channel query value = %s", err.Error())
 	}
 
 	if ac.asset != nil {
